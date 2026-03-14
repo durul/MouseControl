@@ -158,8 +158,8 @@ def _should_keep(name):
     # Drop everything else (WebEngine, 3D, Charts, Multimedia, etc.)
     return False
 
-a.binaries = [b for b in a.binaries if _should_keep(b[0])]
-a.datas    = [d for d in a.datas    if _should_keep(d[0])]
+# a.binaries = [b for b in a.binaries if _should_keep(b[0])]
+# a.datas    = [d for d in a.datas    if _should_keep(d[0])]
 
 exe = EXE(
     pyz,
@@ -247,3 +247,17 @@ def _cleanup():
 print("[Mouser] Post-build cleanup...")
 _cleanup()
 print("[Mouser] Cleanup done.")
+
+# ── macOS App Bundle ───────────────────────────────────────────────────
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name='Mouser.app',
+        icon='images/logo.png', # Ideally we should make an .icns
+        bundle_identifier='com.mouser.app',
+        info_plist={
+            'CFBundleShortVersionString': '1.0.0',
+            'LSUIElement': True, # Runs in background (menu bar app)
+            'NSHighResolutionCapable': True,
+        },
+    )

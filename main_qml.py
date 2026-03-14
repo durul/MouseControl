@@ -15,8 +15,12 @@ import signal
 
 # Ensure project root on path — works for both normal Python and PyInstaller
 if getattr(sys, "frozen", False):
-    # PyInstaller 6.x: data files are in _internal/ next to the exe
-    ROOT = os.path.join(os.path.dirname(sys.executable), "_internal")
+    if sys.platform == "darwin":
+        # macOS .app bundle: data files are in Contents/Resources
+        ROOT = os.path.join(os.path.dirname(os.path.dirname(sys.executable)), "Resources")
+    else:
+        # PyInstaller 6.x Windows: data files are in _internal/ next to the exe
+        ROOT = os.path.join(os.path.dirname(sys.executable), "_internal")
 else:
     ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
