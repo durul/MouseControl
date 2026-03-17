@@ -165,17 +165,19 @@ if sys.platform == "win32":
 
 elif sys.platform == "darwin":
     def get_foreground_exe() -> str | None:
-        """Return the bundle-exe name of the frontmost app on macOS."""
+        """Return a stable app identifier for the frontmost app on macOS."""
         try:
             from AppKit import NSWorkspace
             app = NSWorkspace.sharedWorkspace().frontmostApplication()
             if app is None:
                 return None
+            ident = app.bundleIdentifier()
+            if ident:
+                return ident
             url = app.executableURL()
             if url:
                 return os.path.basename(url.path())
-            ident = app.bundleIdentifier()
-            return ident or app.localizedName()
+            return app.localizedName()
         except Exception:
             return None
 

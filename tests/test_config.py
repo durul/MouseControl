@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from core import app_catalog
 from core import config
 
 
@@ -107,6 +108,67 @@ class ConfigMigrationTests(unittest.TestCase):
         self.assertEqual(
             loaded["profiles"]["default"]["mappings"]["gesture_left"], "none"
         )
+
+    def test_get_profile_for_app_matches_aliases(self):
+        cfg = {
+            "app_overrides": {},
+            "profiles": {
+                "default": {"apps": []},
+                "chrome": {"apps": ["Google Chrome"]},
+            }
+        }
+
+        with patch.object(
+            config,
+            "resolve_app_for_config",
+            return_value={
+                "id": "com.google.Chrome",
+                "aliases": ["com.google.Chrome", "Google Chrome", "Google Chrome.app"],
+            },
+        ):
+            self.assertEqual(
+                config.get_profile_for_app(cfg, "com.google.Chrome"),
+                "chrome",
+            )
+
+
+class AppCatalogTests(unittest.TestCase):
+    def test_resolve_app_spec_uses_catalog_alias(self):
+        fake_catalog = [
+            {
+                "id": "com.google.Chrome",
+                "label": "Google Chrome",
+                "path": "/Applications/Google Chrome.app",
+                "aliases": ["Google Chrome", "Google Chrome.app"],
+                "legacy_icon": "chrom.png",
+            }
+        ]
+
+        with patch.object(app_catalog, "get_app_catalog", return_value=fake_catalog):
+            resolved = app_catalog.resolve_app_spec("Google Chrome")
+
+        self.assertEqual(resolved["id"], "com.google.Chrome")
+        self.assertEqual(resolved["label"], "Google Chrome")
+
+    def test_resolve_app_spec_for_mac_app_path_prefers_bundle_identifier(self):
+        app_path = "/Applications/Google Chrome.app"
+        plist = {
+            "CFBundleIdentifier": "com.google.Chrome",
+            "CFBundleDisplayName": "Google Chrome",
+            "CFBundleExecutable": "Google Chrome",
+        }
+
+        with (
+            patch.object(app_catalog.sys, "platform", "darwin"),
+            patch.object(app_catalog.os.path, "exists", return_value=True),
+            patch.object(app_catalog, "_read_mac_bundle_info", return_value=plist),
+        ):
+            resolved = app_catalog.resolve_app_spec(app_path)
+
+        self.assertEqual(resolved["id"], "com.google.Chrome")
+        self.assertEqual(resolved["label"], "Google Chrome")
+        self.assertEqual(resolved["path"], app_path)
+        self.assertIn("Google Chrome", resolved["aliases"])
 
 
 if __name__ == "__main__":

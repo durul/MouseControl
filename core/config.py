@@ -6,6 +6,9 @@ Supports per-application profiles (for future use).
 import json
 import os
 import sys
+from pathlib import Path
+
+from core.app_catalog import APP_HINTS, get_legacy_icon, resolve_app_spec
 
 CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Mouser")
 if sys.platform == "darwin":
@@ -55,6 +58,7 @@ BUTTON_TO_EVENTS = {
 DEFAULT_CONFIG = {
     "version": 3,
     "active_profile": "default",
+    "app_overrides": {},
     "profiles": {
         "default": {
             "label": "Default (All Apps)",
@@ -89,38 +93,14 @@ DEFAULT_CONFIG = {
     },
 }
 
-# Known applications for per-app profiles
-# Note: Modern UWP apps appear as their package exe (e.g. Microsoft.Media.Player.exe)
-# thanks to ApplicationFrameHost child-window resolution in app_detector.py.
-# icon values must match filenames in images/ (without extension for png,
-# or with extension for non-png like .webp)
-KNOWN_APPS = {
-    # Windows apps
-    "msedge.exe":                {"label": "Microsoft Edge",       "icon": ""},
-    "chrome.exe":                {"label": "Google Chrome",        "icon": "chrom"},
-    "Microsoft.Media.Player.exe":{"label": "Windows Media Player", "icon": "media.webp"},
-    "wmplayer.exe":              {"label": "Windows Media Player (Classic)", "icon": "media.webp"},
-    "vlc.exe":                   {"label": "VLC Media Player",     "icon": "VLC"},
-    "Code.exe":                  {"label": "Visual Studio Code",   "icon": "VSCODE"},
-    # macOS apps (executable names from NSWorkspace)
-    "Safari":                    {"label": "Safari",               "icon": ""},
-    "Google Chrome":             {"label": "Google Chrome",        "icon": "chrom"},
-    "VLC":                       {"label": "VLC Media Player",     "icon": "VLC"},
-    "Code":                      {"label": "Visual Studio Code",   "icon": "VSCODE"},
-    "Finder":                    {"label": "Finder",               "icon": ""},
-}
+# Compatibility alias used by older UI/backend code. The richer app catalog now
+# lives in core.app_catalog, but keeping this export avoids a wider refactor.
+KNOWN_APPS = APP_HINTS
 
 
 def get_icon_for_exe(exe_name: str) -> str:
     """Return the icon image filename (relative to images/) for an exe, or ''."""
-    info = KNOWN_APPS.get(exe_name, {})
-    icon = info.get("icon", "")
-    if not icon:
-        return ""
-    # If icon already has extension, use as-is; otherwise assume .png
-    if "." in icon:
-        return icon
-    return icon + ".png"
+    return get_legacy_icon(exe_name)
 
 
 def ensure_config_dir():
@@ -185,6 +165,19 @@ def create_profile(cfg, name, label=None, copy_from="default", apps=None):
     return cfg
 
 
+def set_app_override(cfg, app_id, label=None, path=None):
+    """Persist custom metadata for an app identifier."""
+    if not app_id:
+        return cfg
+    overrides = cfg.setdefault("app_overrides", {})
+    overrides[app_id] = {
+        "label": label or app_id,
+        "path": os.path.abspath(path) if path else "",
+    }
+    save_config(cfg)
+    return cfg
+
+
 def delete_profile(cfg, name):
     """Delete a profile (cannot delete 'default')."""
     if name == "default":
@@ -196,11 +189,41 @@ def delete_profile(cfg, name):
     return cfg
 
 
+def resolve_app_for_config(cfg, spec):
+    """Resolve app metadata, preferring custom overrides stored in config."""
+    if not spec:
+        return None
+
+    key = spec.casefold()
+    for app_id, override in cfg.get("app_overrides", {}).items():
+        path = os.path.abspath(override.get("path", "")) if override.get("path") else ""
+        aliases = [app_id, override.get("label", app_id)]
+        if path:
+            aliases.extend([path, os.path.basename(path), Path(path).stem])
+        if key in {value.casefold() for value in aliases if value}:
+            return {
+                "id": app_id,
+                "label": override.get("label", app_id),
+                "path": path,
+                "aliases": aliases,
+                "legacy_icon": "",
+            }
+
+    return resolve_app_spec(spec)
+
+
 def get_profile_for_app(cfg, exe_name):
-    """Return the profile name that matches the given executable, or 'default'."""
+    """Return the profile name that matches the given app identifier, or 'default'."""
+    if not exe_name:
+        return "default"
+
+    resolved = resolve_app_for_config(cfg, exe_name)
+    candidate_ids = {alias.casefold() for alias in resolved.get("aliases", [])}
+    candidate_ids.add(resolved.get("id", exe_name).casefold())
     for pname, pdata in cfg.get("profiles", {}).items():
-        if exe_name and exe_name.lower() in [a.lower() for a in pdata.get("apps", [])]:
-            return pname
+        for app_id in pdata.get("apps", []):
+            if app_id and app_id.casefold() in candidate_ids:
+                return pname
     return "default"
 
 
@@ -233,6 +256,7 @@ def _migrate(cfg):
     cfg.setdefault("settings", {})
     cfg["settings"].setdefault("appearance_mode", "system")
     cfg["settings"].setdefault("debug_mode", False)
+    cfg.setdefault("app_overrides", {})
 
     # Always migrate old wmplayer.exe → Microsoft.Media.Player.exe in profile apps
     for pdata in cfg.get("profiles", {}).values():

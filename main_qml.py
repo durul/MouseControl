@@ -12,7 +12,7 @@ _t0 = _time.perf_counter()          # ◄ startup clock
 import sys
 import os
 import signal
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote
 
 # Ensure project root on path — works for both normal Python and PyInstaller
 if getattr(sys, "frozen", False):
@@ -27,9 +27,9 @@ os.environ["QT_QUICK_CONTROLS_STYLE"] = "Material"
 os.environ["QT_QUICK_CONTROLS_MATERIAL_ACCENT"] = "#00d4aa"
 
 _t1 = _time.perf_counter()
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QFileIconProvider
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
-from PySide6.QtCore import QObject, Property, QCoreApplication, QRectF, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, Property, QCoreApplication, QRectF, Qt, QUrl, Signal, QFileInfo
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickImageProvider
 from PySide6.QtSvg import QSvgRenderer
@@ -203,6 +203,34 @@ class AppIconProvider(QQuickImageProvider):
         return pixmap
 
 
+class SystemIconProvider(QQuickImageProvider):
+    def __init__(self):
+        super().__init__(QQuickImageProvider.ImageType.Pixmap)
+        self._provider = QFileIconProvider()
+
+    def requestPixmap(self, icon_id, size, requested_size):
+        encoded_path, _, query_string = icon_id.partition("?")
+        app_path = unquote(encoded_path)
+        params = parse_qs(query_string)
+        logical_size = requested_size.width() if requested_size.width() > 0 else 24
+        if "size" in params:
+            try:
+                logical_size = max(12, int(params["size"][0]))
+            except ValueError:
+                logical_size = max(12, logical_size)
+
+        pixmap = QPixmap()
+        if app_path:
+            icon = self._provider.icon(QFileInfo(app_path))
+            if not icon.isNull():
+                pixmap = icon.pixmap(logical_size, logical_size)
+
+        if size is not None:
+            size.setWidth(logical_size)
+            size.setHeight(logical_size)
+        return pixmap
+
+
 def main():
     _print_startup_times()
     _t5 = _time.perf_counter()
@@ -249,6 +277,7 @@ def main():
     # ── QML Engine ─────────────────────────────────────────────
     qml_engine = QQmlApplicationEngine()
     qml_engine.addImageProvider("appicons", AppIconProvider(ROOT))
+    qml_engine.addImageProvider("systemicons", SystemIconProvider())
     qml_engine.rootContext().setContextProperty("backend", backend)
     qml_engine.rootContext().setContextProperty("uiState", ui_state)
     qml_engine.rootContext().setContextProperty(

@@ -3,15 +3,19 @@ QML Backend Bridge — connects the QML UI to the engine and config.
 Exposes properties, signals, and slots for two-way data binding.
 """
 
+import os
 import sys
 import time
+from urllib.parse import quote
 
-from PySide6.QtCore import QObject, Property, Signal, Slot, Qt
+from PySide6.QtCore import QObject, Property, Signal, Slot, Qt, QUrl
+from PySide6.QtWidgets import QFileDialog
 
+from core.app_catalog import get_app_aliases, get_app_catalog, resolve_app_spec
 from core.config import (
     BUTTON_NAMES, load_config, save_config, get_active_mappings,
     PROFILE_BUTTON_NAMES, set_mapping, create_profile, delete_profile,
-    KNOWN_APPS, get_icon_for_exe,
+    resolve_app_for_config, set_app_override,
 )
 from core.key_simulator import ACTIONS
 
@@ -27,6 +31,7 @@ class Backend(QObject):
     mappingsChanged = Signal()
     settingsChanged = Signal()
     profilesChanged = Signal()
+    knownAppsChanged = Signal()
     activeProfileChanged = Signal()
     statusMessage = Signal(str)
     dpiFromDevice = Signal(int)
@@ -49,6 +54,8 @@ class Backend(QObject):
         super().__init__(parent)
         self._engine = engine
         self._cfg = load_config()
+        self._root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self._known_apps = []
         self._mouse_connected = False
         self._battery_level = -1
         self._debug_lines = []
@@ -92,6 +99,119 @@ class Backend(QObject):
                 engine.set_gesture_event_callback(self._onEngineGestureEvent)
             if hasattr(engine, "set_debug_enabled"):
                 engine.set_debug_enabled(self.debugMode)
+
+        self._refresh_known_apps()
+
+    def _legacy_icon_source(self, icon_name: str) -> str:
+        if not icon_name:
+            return ""
+        return QUrl.fromLocalFile(
+            os.path.join(self._root_dir, "images", icon_name)
+        ).toString()
+
+    def _app_icon_source(self, entry: dict | None, size: int = 24) -> str:
+        if not entry:
+            return ""
+
+        app_path = entry.get("path", "")
+        if app_path:
+            return f"image://systemicons/{quote(app_path, safe='')}?size={size}"
+
+        return self._legacy_icon_source(entry.get("legacy_icon", ""))
+
+    def _serialize_app_entry(self, entry: dict | None, size: int = 24) -> dict:
+        if not entry:
+            return {
+                "id": "",
+                "label": "",
+                "path": "",
+                "iconSource": "",
+                "aliases": [],
+            }
+        return {
+            "id": entry.get("id", ""),
+            "label": entry.get("label", entry.get("id", "")),
+            "path": entry.get("path", ""),
+            "iconSource": self._app_icon_source(entry, size=size),
+            "aliases": list(entry.get("aliases", [])),
+        }
+
+    def _refresh_known_apps(self, refresh: bool = False):
+        entries = {}
+        for entry in get_app_catalog(refresh=refresh):
+            entries[entry["id"].casefold()] = entry
+
+        for app_id in self._cfg.get("app_overrides", {}):
+            entry = resolve_app_for_config(self._cfg, app_id)
+            if entry:
+                entries[entry["id"].casefold()] = entry
+
+        for pdata in self._cfg.get("profiles", {}).values():
+            for app_id in pdata.get("apps", []):
+                entry = resolve_app_for_config(self._cfg, app_id)
+                if entry:
+                    entries.setdefault(entry["id"].casefold(), entry)
+
+        self._known_apps = sorted(
+            entries.values(),
+            key=lambda item: (item.get("label", "").casefold(), item.get("id", "").casefold()),
+        )
+
+    def _slugify_profile_name(self, text: str) -> str:
+        chars = []
+        for ch in text.strip().lower():
+            chars.append(ch if ch.isalnum() else "_")
+        slug = "".join(chars).strip("_")
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        return slug or "profile"
+
+    def _next_profile_name(self, entry: dict) -> str:
+        base = self._slugify_profile_name(entry.get("label") or entry.get("id", "profile"))
+        name = base
+        suffix = 2
+        profiles = self._cfg.get("profiles", {})
+        while name in profiles:
+            name = f"{base}_{suffix}"
+            suffix += 1
+        return name
+
+    def _find_existing_profile_for_app(self, entry: dict) -> str | None:
+        aliases = {value.casefold() for value in get_app_aliases(entry.get("id", ""))}
+        for profile_name, pdata in self._cfg.get("profiles", {}).items():
+            for app_id in pdata.get("apps", []):
+                if app_id and app_id.casefold() in aliases:
+                    return profile_name
+        return None
+
+    def _create_profile_for_entry(self, entry: dict):
+        existing = self._find_existing_profile_for_app(entry)
+        if existing:
+            self.statusMessage.emit("Profile already exists")
+            return
+
+        current = resolve_app_spec(entry.get("id", ""))
+        if entry.get("path") and current.get("path", "") != entry.get("path", ""):
+            self._cfg = set_app_override(
+                self._cfg,
+                entry.get("id", ""),
+                label=entry.get("label", ""),
+                path=entry.get("path", ""),
+            )
+
+        profile_name = self._next_profile_name(entry)
+        self._cfg = create_profile(
+            self._cfg,
+            profile_name,
+            label=entry.get("label") or entry.get("id", profile_name),
+            apps=[entry.get("id", "")],
+        )
+        if self._engine:
+            self._engine.cfg = self._cfg
+        self._refresh_known_apps()
+        self.knownAppsChanged.emit()
+        self.profilesChanged.emit()
+        self.statusMessage.emit("Profile created")
 
     # ── Properties ─────────────────────────────────────────────
 
@@ -233,22 +353,28 @@ class Backend(QObject):
         result = []
         active = self._cfg.get("active_profile", "default")
         for pname, pdata in self._cfg.get("profiles", {}).items():
-            # Collect icons for all apps in this profile
             apps = pdata.get("apps", [])
-            app_icons = [get_icon_for_exe(ex) for ex in apps]
+            app_entries = [resolve_app_for_config(self._cfg, app_id) for app_id in apps]
             result.append({
                 "name": pname,
                 "label": pdata.get("label", pname),
                 "apps": apps,
-                "appIcons": app_icons,
+                "displayApps": [
+                    entry.get("label", app_id) if entry else app_id
+                    for app_id, entry in zip(apps, app_entries)
+                ],
+                "appIcons": [
+                    self._app_icon_source(entry, size=24)
+                    for entry in app_entries
+                    if self._app_icon_source(entry, size=24)
+                ],
                 "isActive": pname == active,
             })
         return result
 
-    @Property(list, constant=True)
+    @Property(list, notify=knownAppsChanged)
     def knownApps(self):
-        return [{"exe": ex, "label": info["label"], "icon": get_icon_for_exe(ex)}
-                for ex, info in KNOWN_APPS.items()]
+        return [self._serialize_app_entry(entry, size=20) for entry in self._known_apps]
 
     # ── Slots ──────────────────────────────────────────────────
 
@@ -364,26 +490,55 @@ class Backend(QObject):
         self.gestureRecordsChanged.emit()
 
     @Slot(str)
-    def addProfile(self, appLabel):
-        """Create a new per-app profile from the known-apps label."""
-        exe = None
-        for ex, info in KNOWN_APPS.items():
-            if info["label"] == appLabel:
-                exe = ex
-                break
-        if not exe:
+    def addProfile(self, appRef):
+        """Create a new per-app profile from a catalog id, alias, or path."""
+        entry = resolve_app_spec(appRef)
+        if not entry or not entry.get("id"):
             return
-        for pdata in self._cfg.get("profiles", {}).values():
-            if exe.lower() in [a.lower() for a in pdata.get("apps", [])]:
-                self.statusMessage.emit("Profile already exists")
-                return
-        safe_name = exe.replace(".exe", "").lower()
-        self._cfg = create_profile(
-            self._cfg, safe_name, label=appLabel, apps=[exe])
-        if self._engine:
-            self._engine.cfg = self._cfg
-        self.profilesChanged.emit()
-        self.statusMessage.emit("Profile created")
+        self._create_profile_for_entry(entry)
+
+    @Slot()
+    def browseForAppProfile(self):
+        """Open a native chooser for a custom app and create a profile for it."""
+        start_dir = "/Applications" if sys.platform == "darwin" else os.path.expanduser("~")
+        selected_path = ""
+
+        if sys.platform == "darwin":
+            selected_path, _ = QFileDialog.getOpenFileName(
+                None,
+                "Choose Application",
+                start_dir,
+                "Applications (*.app)",
+            )
+        elif sys.platform == "win32":
+            selected_path, _ = QFileDialog.getOpenFileName(
+                None,
+                "Choose Application",
+                start_dir,
+                "Applications (*.exe)",
+            )
+        else:
+            selected_path, _ = QFileDialog.getOpenFileName(
+                None,
+                "Choose Application",
+                start_dir,
+            )
+
+        if not selected_path:
+            return
+
+        entry = resolve_app_spec(selected_path)
+        if not entry or not entry.get("id"):
+            self.statusMessage.emit("Unsupported app")
+            return
+
+        self._create_profile_for_entry(entry)
+
+    @Slot()
+    def refreshKnownApps(self):
+        self._refresh_known_apps(refresh=True)
+        self.knownAppsChanged.emit()
+        self.statusMessage.emit("Apps refreshed")
 
     @Slot(str)
     def deleteProfile(self, name):
@@ -393,6 +548,8 @@ class Backend(QObject):
         if self._engine:
             self._engine.cfg = self._cfg
             self._engine.reload_mappings()
+        self._refresh_known_apps()
+        self.knownAppsChanged.emit()
         self.profilesChanged.emit()
         self.statusMessage.emit("Profile deleted")
 
