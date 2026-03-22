@@ -60,7 +60,10 @@ Actions that use **Ctrl** on Windows automatically use **Cmd (⌘)** on macOS:
 - Undo → Cmd+Z
 - etc.
 
-**Alt+Tab** becomes **Cmd+Tab**, **Win+D** becomes **Ctrl+Up** (Mission Control).
+Desktop/navigation actions are also remapped to native macOS behavior:
+- **Alt+Tab** becomes **Cmd+Tab**
+- Compatibility entries like **Win+D** / **Task View** resolve to native macOS navigation shortcuts
+- Mouser also exposes macOS-specific actions such as **Mission Control**, **App Expose**, **Previous Desktop**, **Next Desktop**, **Show Desktop**, and **Launchpad**
 
 ### HID Access
 
@@ -95,7 +98,10 @@ The packaged app runs as an `LSUIElement`, so it lives in the menu bar instead o
 
 ```bash
 python main_qml.py
+python main_qml.py --start-hidden
 ```
+
+Use `--start-hidden` to launch straight into the menu bar without opening the settings window. This is the same flag the macOS login item uses when **Launch hidden after login** is enabled.
 
 ## Start at Login
 
@@ -104,6 +110,7 @@ Mouser can now manage **Start at login** from the app UI on macOS.
 - The toggle writes a LaunchAgent plist to `~/Library/LaunchAgents/io.github.tombadash.mouser.plist`
 - If **Launch hidden after login** is enabled, the login item passes `--start-hidden` so Mouser starts in the menu bar without popping the settings window
 - The setting is designed for the packaged `.app`, but it also works in a source checkout by launching the current Python interpreter directly
+- Turning **Start at login** back off removes that LaunchAgent plist again
 
 ## Accessibility for the Packaged App
 
